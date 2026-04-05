@@ -1,0 +1,6 @@
+*.sh
+CMAPSSData
+__pycache__
+*.npy
+*.csv
+PyTorch-GAN
