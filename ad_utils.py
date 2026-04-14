@@ -24,22 +24,22 @@ def normalize_per_sensor(waveforms):
 
 def signal_to_mel_img(data, device):
     
-    SAMPLE_RATE = 2_500_000  # Hz (2.5 MHz) - from 400 ns sampling period: 1/(400e-9) = 2.5e6
-    N_FFT = 256              # FFT window size (smaller = better time resolution)
-    HOP_LENGTH = 16          # Overlap (smaller = more frames, less info loss)
-    N_MELS = 128        # Mel frequency bins (more = finer frequency detail)
-    F_MIN = 0           # Min frequency
-    F_MAX = SAMPLE_RATE // 2  # Nyquist frequency
+    # SAMPLE_RATE = 2_500_000  # Hz (2.5 MHz) - from 400 ns sampling period: 1/(400e-9) = 2.5e6
+    # N_FFT = 256              # FFT window size (smaller = better time resolution)
+    # HOP_LENGTH = 16          # Overlap (smaller = more frames, less info loss)
+    # N_MELS = 128        # Mel frequency bins (more = finer frequency detail)
+    # F_MIN = 0           # Min frequency
+    # F_MAX = SAMPLE_RATE // 2  # Nyquist frequency
 
     wav2mel = torchaudio.transforms.MelSpectrogram(
-        sample_rate=1,
-        n_fft=16,
+        sample_rate=240,
+        n_fft=32,
         # win_length=N_FFT,
         hop_length=4,
         # f_min=F_MIN,
         # f_max=F_MAX,
-        n_mels=9,
-        # power=2.0,           # Power spectrogram
+        n_mels=32,
+        power=2.0,           # Power spectrogram
     ).to(device)
 
     amp2db = torchaudio.transforms.AmplitudeToDB(stype="power", top_db=80).to(device)
@@ -67,9 +67,9 @@ def build_image_tensor(data, device):
     for i in range(N):
         sensor_imgs = [signal_to_mel_img(data[i, :, s], device) for s in range(N_SENSORS)]
         all_img.append(torch.stack(sensor_imgs))
-
+    torch.cuda.empty_cache()
     result = torch.stack(all_img)
-
+    torch.cuda.empty_cache()
     return result
 
 ####################################################

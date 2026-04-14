@@ -12,4 +12,4 @@ nbformat>=4.2.0
 opencv-python
 pillow
 torcheval
-
+jupyter
