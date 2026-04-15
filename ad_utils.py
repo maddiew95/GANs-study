@@ -113,7 +113,7 @@ def extract_features(images, device, batch_size=32):
             all_feats.append(fused)
  
     result = torch.cat(all_feats, dim=0)   # (N, 57344)
-
+    torch.cuda.empty_cache()
     return result
 
 
@@ -182,8 +182,9 @@ def split_and_shuffle_phase2(img_feat, label, n_train, test_norm_range, test_fau
 
 class Autoencoder(nn.Module):
 
-    def __init__(self, input_dim = 14 *4096):
+    def __init__(self, n_sensors):
         super().__init__()
+        input_dim = n_sensors * 4096
         self.encoder = nn.Sequential(
             nn.Linear(input_dim, 4096),
             nn.ReLU(), 
@@ -298,7 +299,7 @@ def train_autoencoder(model, features_data, normalizer, n_epochs, lr, device):
         scheduler.step()
 
         print(f"Epoch {epoch+1:>4}/{n_epochs}  Loss: {epoch_loss:.6f}")
-        
+    torch.cuda.empty_cache()
     return history, normalizer
 
 
