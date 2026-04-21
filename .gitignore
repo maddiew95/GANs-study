@@ -1,25 +1,11 @@
-*.sh
-
-# don't import the data
+# No data import
 CMAPSSData
-csv
-npy
-
-__pycache__
-*.npy
-*.csv
+CSV_Files
 
 # From other repo
 PyTorch-GAN
 
-*.pdf
-*.mat
-
-# Never added but may consider if data is good to use
-ADAPT
-Electrical Fault detection and classification
-Fault Diagnosis of Bearings
-IMS Bearings
-Metro PT3
-Milling
-Smart Grid
+# Misc
+__pycache__
+*.npy
+*.csv
