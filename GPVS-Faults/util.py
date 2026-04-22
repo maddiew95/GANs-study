@@ -1,15 +1,16 @@
 from sklearn.preprocessing import StandardScaler
 import numpy as np
 
-cols = slice(1, 14)
-label_col = -1
+COLS = slice(1, 14)
+LABEL = -1
 
 def zscore(data, scaler=None):
+    data_norm = data.copy()
     if scaler is None:
         scaler = StandardScaler()
-        data_norm[:, cols] = scaler.fit_transform(data[:, cols])
+        data_norm[:, COLS] = scaler.fit_transform(data[:, COLS])
     else:
-        data_norm[:, cols] = scaler.transform(data[:, cols])
+        data_norm[:, COLS] = scaler.transform(data[:, COLS])
     return data_norm, scaler
 
 def outlier_remove(data, verbose=True):
@@ -17,14 +18,14 @@ def outlier_remove(data, verbose=True):
     Remove rows where any feature value falls outside
     [Q1 - 1.5*IQR, Q3 + 1.5*IQR], with bounds computed per class.
     """
-    labels = data[:, label_col]
+    labels = data[:, LABEL]
     unique_classes = np.unique(labels)
     keep_mask = np.ones(len(data), dtype=bool)
     log = {}
     
-    for cls in unique_classes:
-        class_mask = labels == cls
-        class_features = data[class_mask][:, cols]
+    for kelas in unique_classes:
+        class_mask = labels == kelas
+        class_features = data[class_mask][:, COLS]
         
         # Per-feature IQR bounds for this class
         Q1 = np.percentile(class_features, 25, axis=0)
@@ -48,7 +49,7 @@ def outlier_remove(data, verbose=True):
         
         n_before = int(class_mask.sum())
         n_removed = int(n_before - within.sum())
-        log[int(cls)] = {
+        log[int(kelas)] = {
             'rows_before': n_before,
             'rows_removed': n_removed,
             'pct_removed': round(100 * n_removed / n_before, 2)
@@ -62,19 +63,19 @@ def outlier_remove(data, verbose=True):
         print(f"Total removed: {len(data) - len(cleaned)} "
               f"({100 * (len(data) - len(cleaned)) / len(data):.2f}%)")
         print("\nPer-class breakdown:")
-        for cls, stats in log.items():
-            print(f"  Class {cls}: {stats['rows_removed']:>5} / "
+        for kelas, stats in log.items():
+            print(f"  Class {kelas}: {stats['rows_removed']:>5} / "
                   f"{stats['rows_before']:>5} removed "
                   f"({stats['pct_removed']:.2f}%)")
     return cleaned, log
 
-def preprocess_scenario(X_train, X_val, X_test):
-    # Outlier removal on training only
-    X_train, _ = outlier_remove(X_train)
-
-    # Z-score — fit on train, apply to all
+def preprocess_scenario(X_train, X_val, X_test, verbose=False):
+    # Step 1: outlier removal on training only
+    X_train, outlier_log = outlier_remove(X_train, verbose=verbose)
+    
+    # Step 2: Z-score — fit on train, apply to all
     X_train_norm, scaler = zscore(X_train)
-    X_val_norm,   _      = zscore(X_val, scaler=scaler)
+    X_val_norm,   _      = zscore(X_val,  scaler=scaler)
     X_test_norm,  _      = zscore(X_test, scaler=scaler)
     
-    return X_train_norm, X_val_norm, X_test_norm, scaler
+    return X_train_norm, X_val_norm, X_test_norm, scaler, outlier_log
