@@ -1,6 +1,7 @@
 # No data import
 CMAPSSData
 CSV_Files
+NPY_Files
 
 # From other repo
 PyTorch-GAN
