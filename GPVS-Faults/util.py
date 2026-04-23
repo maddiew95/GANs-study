@@ -13,11 +13,10 @@ def zscore(data, scaler=None):
         data_norm[:, COLS] = scaler.transform(data[:, COLS])
     return data_norm, scaler
 
+# Remove rows where any feature value falls outside
+# [Q1 - 1.5*IQR, Q3 + 1.5*IQR], with bounds computed per class.
+# per Li et al's work
 def outlier_remove(data, verbose=True):
-    """
-    Remove rows where any feature value falls outside
-    [Q1 - 1.5*IQR, Q3 + 1.5*IQR], with bounds computed per class.
-    """
     labels = data[:, LABEL]
     unique_classes = np.unique(labels)
     keep_mask = np.ones(len(data), dtype=bool)
