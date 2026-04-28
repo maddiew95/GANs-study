@@ -45,7 +45,7 @@ class LSTM_XGB:
             learning_rate=0.1,             # Li: eta = 0.1
             n_estimators=56,               # Li: iters_optimal = 56
             # --- Corrected from Li's typo ---
-            objective="reg:linear",    # Li listed reg:linear (typo -- incompatible with 8-class)
+            objective="multi:softprob",    # Li listed reg:linear (typo -- incompatible with 8-class)
             num_class=n_classes,
             # --- Standard defaults (not specified by Li) ---
             max_depth=6,                   # XGBoost default; Li doesn't publish
