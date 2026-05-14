@@ -4,7 +4,39 @@ import torch.optim as optim
 from torch.utils.data import TensorDataset, DataLoader
 from sklearn.svm import SVC
 
-from models.transformer_lstm import Transformer_LSTM
+
+class TransformerLSTMBackbone(nn.Module):
+    def __init__(self, d_model: int = 13, n_heads: int = 1,
+                 n_attn_layers: int = 2, dropout: float = 0.41,
+                 lstm_hidden: int = 32, seq_len: int = 13,
+                 # we still need a softmax head for stage-1 training
+                 n_classes: int = 8):
+        super().__init__()
+        self.input_proj = nn.Linear(1, d_model)
+        self.pos_emb = nn.Parameter(torch.randn(1, seq_len, d_model))
+
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model, nhead=n_heads, dim_feedforward=4 * d_model,
+            dropout=dropout, activation="relu", batch_first=True,
+        )
+        self.transformer = nn.TransformerEncoder(
+            encoder_layer, num_layers=n_attn_layers)
+        self.lstm = nn.LSTM(input_size=d_model, hidden_size=lstm_hidden,
+                            batch_first=True)
+        # Auxiliary FC head only used during stage-1 cross-entropy training
+        self.aux_fc = nn.Linear(lstm_hidden, n_classes)
+
+    def features(self, x):
+        """Returns LSTM hidden state — what Li feeds to the SVM."""
+        x = x.transpose(1, 2)
+        x = self.input_proj(x) + self.pos_emb
+        x = self.transformer(x)
+        _, (h_n, _) = self.lstm(x)
+        return h_n.squeeze(0)                # (B, lstm_hidden=32)
+
+    def forward(self, x):
+        """Returns logits for stage-1 cross-entropy training."""
+        return self.aux_fc(self.features(x))
 
 
 class Transformer_LSTM_SVM:
@@ -12,16 +44,16 @@ class Transformer_LSTM_SVM:
                  seed: int = 0, **backbone_kw):
         self.device = device
         torch.manual_seed(seed)
-        self.backbone = Transformer_LSTM(
-            n_classes=n_classes, **backbone_kw).to(device)
-        # Xavier init on Linear layers (match MATLAB's Glorot default)
+        # Per Li Table IV for the SVM variant: dropout=0.41, lstm=32
+        defaults = dict(dropout=0.41, lstm_hidden=32, d_model=13)
+        defaults.update(backbone_kw)
+        self.backbone = TransformerLSTMBackbone(
+            n_classes=n_classes, **defaults).to(device)
         for m in self.backbone.modules():
             if isinstance(m, nn.Linear):
                 nn.init.xavier_uniform_(m.weight)
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
-
-        # RBF-kernel SVM (Li Table IV). gamma='scale' matches sklearn default.
         self.svm = SVC(
             kernel="rbf", gamma="scale",
             decision_function_shape="ovr",
@@ -29,15 +61,12 @@ class Transformer_LSTM_SVM:
         )
 
     def fit_backbone(self, X_train, y_train, X_val=None, y_val=None,
-                     epochs=70, lr=1e-3, weight_decay=1e-4,
+                     epochs=200, lr=1e-3,
                      batch_size=50, seed=0, verbose=False):
-        opt = optim.Adam(self.backbone.parameters(), lr=lr,
-                         betas=(0.9, 0.999), eps=1e-8,
-                         weight_decay=weight_decay)
-        scheduler = optim.lr_scheduler.StepLR(opt, step_size=20, gamma=0.5)
+        # NOTE: no weight_decay, no scheduler — matches working Transformer-LSTM setup
+        opt = optim.Adam(self.backbone.parameters(), lr=lr)
         loss_fn = nn.CrossEntropyLoss()
 
-        # MATLAB-style shuffle once
         g = torch.Generator().manual_seed(seed)
         perm = torch.randperm(len(X_train), generator=g)
         loader = DataLoader(TensorDataset(X_train[perm], y_train[perm]),
@@ -56,9 +85,8 @@ class Transformer_LSTM_SVM:
                 tr_loss    += loss.item() * xb.size(0)
                 tr_correct += (logits.argmax(1) == yb).sum().item()
                 tr_n       += xb.size(0)
-            scheduler.step()
 
-            if verbose and (ep == 1 or ep % 10 == 0 or ep == epochs):
+            if verbose and (ep == 1 or ep % 20 == 0 or ep == epochs):
                 msg = (f"  [stage1] ep {ep:3d} | "
                        f"loss {tr_loss/tr_n:.4f} acc {tr_correct/tr_n:.3f}")
                 if X_val is not None and y_val is not None:
@@ -76,10 +104,9 @@ class Transformer_LSTM_SVM:
 
     @torch.no_grad()
     def _features(self, X):
-        """Returns FC(8) logits per sample -- the inputs to what would have
-        been the softmax in pure Transformer-LSTM."""
+        """Returns LSTM hidden state — what Li feeds to the SVM."""
         self.backbone.eval()
-        return self.backbone(X.to(self.device)).cpu().numpy()
+        return self.backbone.features(X.to(self.device)).cpu().numpy()
 
     def fit_svm(self, X, y):
         y_np = y.cpu().numpy() if torch.is_tensor(y) else y

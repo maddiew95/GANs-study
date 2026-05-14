@@ -42,9 +42,11 @@ class AnomalyAE(nn.Module):
 
 class AnomalyDetector:
     def __init__(self, in_dim=13, hidden_dims=(32, 16), latent_dim=8,
-                 device="cpu", seed=0):
+                 device="cpu", seed=0, score_mode="mse"):
+        assert score_mode in ("mse", "mahalanobis", "combined")
         self.device = device
         torch.manual_seed(seed)
+        self.score_mode = score_mode
         self.model = AnomalyAE(in_dim, hidden_dims, latent_dim).to(device)
         # Xavier init for Linear layers (matches MATLAB Glorot default)
         for m in self.model.modules():
@@ -52,6 +54,14 @@ class AnomalyDetector:
                 nn.init.xavier_uniform_(m.weight)
                 nn.init.zeros_(m.bias)
         self.threshold_ = None
+        # Mahalanobis stats — fitted in fit_mahalanobis()
+        self.mu_         = None
+        self.cov_inv_    = None
+        # Score normalization stats — fitted in _fit_score_normalizers()
+        self._mse_mean   = None
+        self._mse_std    = None
+        self._mah_mean   = None
+        self._mah_std    = None
 
     def fit(self, X_f0, X_f0_val=None, epochs=70, lr=1e-2,
             weight_decay=1e-4, batch_size=50, seed=0, verbose=False):
@@ -88,15 +98,62 @@ class AnomalyDetector:
                     val_mse = self.score(X_f0_val).mean()
                     msg += f" | val MSE {val_mse:.6f}"
                 print(msg)
+        # After training, fit the latent statistics on the F0 training set
+        # (needed for Mahalanobis scoring; harmless if mode == "mse")
+        self._fit_mahalanobis_stats(X_f0)
+        # Also fit normalizers on F0 training set so combined scoring
+        # weights MSE and Mahalanobis comparably
+        self._fit_score_normalizers(X_f0)
+    
+    @torch.no_grad()
+    def _fit_mahalanobis_stats(self, X_f0):
+        """Compute mean and inverse covariance of F0 latent representations."""
+        self.model.eval()
+        z = self.model.encode(X_f0.to(self.device)).cpu().numpy()  # (N, latent_dim)
+        self.mu_ = z.mean(axis=0)                                  # (latent_dim,)
+        cov = np.cov(z.T) + 1e-6 * np.eye(z.shape[1])              # ridge for stability
+        self.cov_inv_ = np.linalg.pinv(cov)
 
     @torch.no_grad()
-    def score(self, X):
+    def _fit_score_normalizers(self, X_f0):
+        """Fit mean/std of each scorer on F0 training samples, so that
+        scores are on comparable scales when combining."""
+        mse = self._mse_score(X_f0)
+        mah = self._mahalanobis_score(X_f0)
+        self._mse_mean, self._mse_std = float(mse.mean()), float(mse.std() + 1e-8)
+        self._mah_mean, self._mah_std = float(mah.mean()), float(mah.std() + 1e-8)
+
+    @torch.no_grad()
+    def _mse_score(self, X):
         self.model.eval()
         X = X.to(self.device)
         x_hat, _ = self.model(X)
         target = X.squeeze(1) if X.dim() == 3 else X
-        per_sample = ((x_hat - target) ** 2).mean(dim=1)
-        return per_sample.cpu().numpy()
+        return ((x_hat - target) ** 2).mean(dim=1).cpu().numpy()
+
+    @torch.no_grad()
+    def _mahalanobis_score(self, X):
+        if self.mu_ is None or self.cov_inv_ is None:
+            raise RuntimeError(".fit() must be called before mahalanobis scoring.")
+        self.model.eval()
+        z = self.model.encode(X.to(self.device)).cpu().numpy()     # (N, latent_dim)
+        diff = z - self.mu_                                        # (N, latent_dim)
+        # quadratic form: sqrt((diff @ cov_inv * diff).sum(axis=1))
+        return np.sqrt(np.einsum("ij,jk,ik->i", diff, self.cov_inv_, diff))
+
+    def score(self, X):
+        if self.score_mode == "mse":
+            return self._mse_score(X)
+        elif self.score_mode == "mahalanobis":
+            return self._mahalanobis_score(X)
+        elif self.score_mode == "combined":
+            mse = self._mse_score(X)
+            mah = self._mahalanobis_score(X)
+            mse_z = (mse - self._mse_mean) / self._mse_std
+            mah_z = (mah - self._mah_mean) / self._mah_std
+            return mse_z + mah_z
+        else:
+            raise ValueError(f"Unknown score_mode: {self.score_mode}")
 
     def calibrate(self, X_f0_val, target_far=0.05):
         scores = self.score(X_f0_val)
