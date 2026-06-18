@@ -40,64 +40,62 @@ def set_seed(seed: int):
 
 def _weights_init(m):
     classname = m.__class__.__name__
-    if classname.find("Conv") != -1:
+    if classname.find("Linear") != -1:
         nn.init.normal_(m.weight.data, 0.0, 0.02)
+        if m.bias is not None:
+            nn.init.constant_(m.bias.data, 0.0)
     elif classname.find("BatchNorm") != -1:
         nn.init.normal_(m.weight.data, 1.0, 0.02)
         nn.init.constant_(m.bias.data, 0.0)
 
 
 # ----------------------------------------------------------------------
-# Architecture
+# Architecture (MLP — the right inductive bias for 13 UNORDERED features)
 # ----------------------------------------------------------------------
+# Convolutions assume adjacent indices are correlated; GPVS features are not
+# ordered, so Conv1d models structure that isn't there. These are plain MLPs.
 class Generator1D(nn.Module):
-    def __init__(self, latent_dim=64, n_features=13, base_ch=128):
-        super().__init__()
-        self.base_ch = base_ch
-        self.n_features = n_features
-        self.l1 = nn.Linear(latent_dim, base_ch * n_features)
-        self.conv_blocks = nn.Sequential(
-            nn.BatchNorm1d(base_ch),
-            nn.Conv1d(base_ch, base_ch, 3, stride=1, padding=1),
-            nn.BatchNorm1d(base_ch, 0.8),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv1d(base_ch, base_ch // 2, 3, stride=1, padding=1),
-            nn.BatchNorm1d(base_ch // 2, 0.8),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv1d(base_ch // 2, 1, 3, stride=1, padding=1),
-            nn.Tanh(),  # output in [-1, 1] -> must match scaler range
-        )
-
-    def forward(self, z):
-        out = self.l1(z).view(z.size(0), self.base_ch, self.n_features)
-        out = self.conv_blocks(out)        # (B, 1, n_features)
-        return out.squeeze(1)              # (B, n_features)
-
-
-class Discriminator1D(nn.Module):
-    def __init__(self, n_features=13):
+    def __init__(self, latent_dim=64, n_features=13, hidden=128):
         super().__init__()
 
-        def block(in_ch, out_ch, bn=True):
-            layers = [nn.Conv1d(in_ch, out_ch, 3, stride=2, padding=1),
-                      nn.LeakyReLU(0.2, inplace=True),
-                      nn.Dropout(0.25)]
-            if bn:
-                layers.append(nn.BatchNorm1d(out_ch, 0.8))
+        def block(in_f, out_f, normalize=True):
+            layers = [nn.Linear(in_f, out_f)]
+            if normalize:                       # BatchNorm is fine in the GENERATOR
+                layers.append(nn.BatchNorm1d(out_f, 0.8))
+            layers.append(nn.LeakyReLU(0.2, inplace=True))
             return layers
 
         self.model = nn.Sequential(
-            *block(1, 16, bn=False),
-            *block(16, 32),
-            *block(32, 64),
+            *block(latent_dim, hidden, normalize=False),
+            *block(hidden, hidden * 2),
+            *block(hidden * 2, hidden * 2),
+            nn.Linear(hidden * 2, n_features),
+            nn.Tanh(),                          # output in [-1, 1] -> matches scaler
         )
-        # Adaptive pool makes the head robust to n_features without hardcoding
-        self.head = nn.Sequential(nn.AdaptiveAvgPool1d(1), nn.Flatten(),
-                                  nn.Linear(64, 1), nn.Sigmoid())
+
+    def forward(self, z):
+        return self.model(z)                    # (B, n_features)
+
+
+class Discriminator1D(nn.Module):
+    def __init__(self, n_features=13, hidden=128):
+        super().__init__()
+        # CRITICAL: no BatchNorm in D. For tabular data the real/fake signal lives
+        # in per-feature means and scales; BatchNorm (with separate real/fake
+        # passes) normalizes exactly that away and collapses D to a constant 0.5.
+        self.model = nn.Sequential(
+            nn.Linear(n_features, hidden),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Dropout(0.3),
+            nn.Linear(hidden, hidden),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Dropout(0.3),
+            nn.Linear(hidden, 1),
+            nn.Sigmoid(),                       # kept for BCE compatibility
+        )
 
     def forward(self, x):
-        x = x.unsqueeze(1)                 # (B, 1, n_features)
-        return self.head(self.model(x))
+        return self.model(x)                    # x is (B, n_features)
 
 
 # ----------------------------------------------------------------------
@@ -135,10 +133,10 @@ def train_dcgan(X_raw, seed, device, n_epochs=300, batch_size=64,
     opt_G = torch.optim.Adam(G.parameters(), lr=lr, betas=(b1, b2))
     opt_D = torch.optim.Adam(D.parameters(), lr=lr, betas=(b1, b2))
 
-    # Per-epoch training diagnostics.
-    #   d_acc  ~0.5  -> healthy equilibrium (D cannot separate real from fake)
-    #   d_acc  ~1.0  -> D dominates / generator collapsed (low-fidelity synthetic)
-    #   d_real -> mean D(real), should sit above d_fake but not pin at 1.0
+    # Per-epoch training diagnostics. IMPORTANT: d_acc ~0.5 is ambiguous —
+    #   healthy: d_loss BELOW ln(2)=0.693 and d_real > d_fake (D learning, G good)
+    #   DEAD:    d_loss PINNED at 0.693 with d_real == d_fake == 0.5 (D collapsed
+    #            to a constant, G gets no gradient). Read d_loss + the gap, not d_acc alone.
     history = {"d_loss": [], "g_loss": [], "d_acc": [],
                "d_real": [], "d_fake": []}
 

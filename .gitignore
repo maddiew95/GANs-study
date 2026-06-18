@@ -10,3 +10,6 @@ PyTorch-GAN
 __pycache__
 *.npy
 *.csv
+*.html
+.ipynb_checkpoints
+gan_diag
