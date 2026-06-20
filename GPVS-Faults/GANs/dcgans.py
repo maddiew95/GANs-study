@@ -86,10 +86,10 @@ class Discriminator1D(nn.Module):
         self.model = nn.Sequential(
             nn.Linear(n_features, hidden),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(0.3),
+            nn.Dropout(0.1),
             nn.Linear(hidden, hidden),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(0.3),
+            nn.Dropout(0.1),
             nn.Linear(hidden, 1),
             nn.Sigmoid(),                       # kept for BCE compatibility
         )

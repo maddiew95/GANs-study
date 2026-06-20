@@ -74,14 +74,14 @@ def outlier_remove(data, verbose=True):
 
 def preprocess_scenario(train, val, test, verbose=False):
     # Step 1: outlier removal on training only
-    train_outlier_removed, outlier_log = outlier_remove(train, verbose=verbose)
+    # train_outlier_removed, outlier_log = outlier_remove(train, verbose=verbose)
     
     # Step 2: Z-score — fit on train, apply to all
-    X_train_norm, scaler = zscore(train_outlier_removed)
+    X_train_norm, scaler = zscore(train)
     X_val_norm,   _      = zscore(val,  scaler=scaler)
     X_test_norm,  _      = zscore(test, scaler=scaler)
     
-    return X_train_norm, X_val_norm, X_test_norm, scaler, outlier_log
+    return X_train_norm, X_val_norm, X_test_norm, scaler
 
 def count_parameters(model):
     """Count trainable parameters. Returns (total, by_type_dict)."""
