@@ -2,6 +2,8 @@
 CMAPSSData
 CSV_Files
 NPY_Files
+TimeGANs_csv
+
 
 # From other repo
 PyTorch-GAN
