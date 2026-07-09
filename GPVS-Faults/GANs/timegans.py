@@ -14,11 +14,17 @@ PyTorch redesign of jsyoon0823/TimeGAN (Yoon et al., NeurIPS 2019) for this doma
     the class's (time-ordered!) rows; generated windows are UNROLLED back into
     individual rows so the row-based classifiers consume them unchanged.
 
-DATA REQUIREMENT (critical)
----------------------------
-Feed this module the CONTIGUOUS scene files from TimeGANs_csv/ (subsample_timegan),
-NOT the random-sampled CSV_Files scenes. Random rows destroy within-window
-chronology and reduce TimeGAN to an expensive autoencoder.
+DATA REQUIREMENT (critical) — two different roles for real data
+----------------------------------------------------------------
+* train_class_gans: feed the CONTIGUOUS scene files from TimeGANs_csv/
+  (subsample_timegan), NOT the random-sampled CSV_Files scenes. Random rows
+  destroy within-window chronology and reduce TimeGAN to an expensive
+  autoencoder.
+* augment: feed the STANDARD random-sampled CSV_Files scene train — the same
+  file the other GANs augment. Writing the contiguous data into the classifier
+  track was Issue 2: it silently changed the ratio-0 baseline (~37% vs ~90% F1)
+  and invalidated every cross-GAN comparison. Only the GAN sees contiguous data;
+  the classifiers must never train on it.
 
 Scarce-scene behaviour: if a class has fewer rows than seq_len, the window length
 shrinks to that class's row count (recorded in history["seq_len_used"]); with
@@ -57,26 +63,51 @@ class _GRUNet(nn.Module):
         return self.act(self.fc(out))
 
 
-def _make_windows(X_rows, seq_len):
-    """(n_rows, F) -> (n_windows, L, F) stride-1 windows. Assumes rows are
-    time-ordered. Shrinks L to n_rows when the class is too small (degenerate)."""
+def _make_windows(X_rows, seq_len, ts=None, gap_factor=1.5):
+    """(n_rows, F) -> (n_windows, L, F) stride-1 windows.
+
+    If `ts` (per-row timestamps) is given, rows are first split into contiguous
+    RUNS wherever the time step exceeds gap_factor x median dt, and windows are
+    cut WITHIN runs only — a window must never straddle a discontinuity. This
+    matters when the training set is several contiguous chunks concatenated
+    (multi-chunk subsample) or when holdout-row drops punched 1-row gaps into a
+    block. Without ts, the old single-run behaviour applies.
+
+    L shrinks to the longest run when runs are shorter than seq_len (degenerate;
+    recorded in history). Returns (windows, L, n_runs).
+    """
     n = len(X_rows)
-    L = min(seq_len, n)
-    idx = np.arange(L)[None, :] + np.arange(n - L + 1)[:, None]
-    return X_rows[idx], L
+    if ts is not None and n > 1:
+        d = np.diff(np.asarray(ts, dtype="float64"))
+        dt = np.median(np.abs(d))
+        brk = np.where(np.abs(d) > gap_factor * dt)[0] if dt > 0 else np.array([], int)
+        runs = np.split(np.arange(n), brk + 1)
+    else:
+        runs = [np.arange(n)]
+    L = min(seq_len, max(len(r) for r in runs))
+    wins = []
+    for r in runs:
+        if len(r) < L:
+            continue                      # run too short for even the shrunken L
+        Xr = X_rows[r]
+        idx = np.arange(L)[None, :] + np.arange(len(r) - L + 1)[:, None]
+        wins.append(Xr[idx])
+    return np.concatenate(wins), L, len(runs)
 
 
-def train_timegan(X_rows, seed, device, seq_len=24, hidden_dim=24, num_layers=3,
+def train_timegan(X_rows, seed, device, ts=None, seq_len=24, hidden_dim=24,
+                  num_layers=3,
                   n_epochs_emb=300, n_epochs_sup=300, n_epochs_joint=400,
                   batch_size=64, lr=1e-3, gamma=1.0, verbose=False):
     """Train one TimeGAN on ONE class's time-ordered feature rows.
-    Returns (handle, history)."""
+    `ts`: per-row timestamps; when given, windows are cut within contiguous
+    runs only (multi-chunk safe). Returns (handle, history)."""
     set_seed(seed)
     n_features = X_rows.shape[1]
 
     scaler = MinMaxScaler(feature_range=(0, 1)).fit(X_rows)
     Xs = scaler.transform(X_rows).astype("float32")
-    windows, L = _make_windows(Xs, seq_len)
+    windows, L, n_runs = _make_windows(Xs, seq_len, ts=ts)
 
     z_dim = n_features
     bs = min(batch_size, len(windows))
@@ -97,7 +128,7 @@ def train_timegan(X_rows, seed, device, seq_len=24, hidden_dim=24, num_layers=3,
     opt_er = torch.optim.Adam(list(embedder.parameters()) + list(recovery.parameters()), lr=lr)
 
     history = {"e_loss": [], "s_loss": [], "g_loss": [], "d_loss": [],
-               "seq_len_used": L, "n_windows": len(windows)}
+               "seq_len_used": L, "n_windows": len(windows), "n_runs": n_runs}
 
     def rand_z(n, T):
         return torch.rand(n, T, z_dim, device=device)
@@ -200,17 +231,22 @@ def generate(handle, n_rows, seed, device):
 
 # ---------- public API mirrors dcgans/wgans ----------
 def train_class_gans(train_array, seed, device, n_classes=8,
-                     feat_slice=(1, 14), label_col=-1, **gan_kw):
+                     feat_slice=(1, 14), label_col=-1, ts_col=0, **gan_kw):
     """One TimeGAN per class. train_array rows MUST be time-ordered within each
-    class (use TimeGANs_csv). Returns (gans, histories) shaped like dcgans."""
+    class (use TimeGANs_csv; multiple contiguous chunks are fine — timestamps
+    in `ts_col` are used to split windowing at chunk boundaries).
+    Returns (gans, histories) shaped like dcgans."""
     feats = train_array[:, feat_slice[0]:feat_slice[1]].astype("float32")
     labels = train_array[:, label_col].astype(int)
+    tsall = train_array[:, ts_col].astype("float64") if ts_col is not None else None
     gans, histories = {}, {}
     for c in range(n_classes):
-        Xc = feats[labels == c]
+        sel = labels == c
+        Xc = feats[sel]
         if len(Xc) < 2:
             continue
-        handle, hist = train_timegan(Xc, seed=seed, device=device, **gan_kw)
+        tc = tsall[sel] if tsall is not None else None
+        handle, hist = train_timegan(Xc, seed=seed, device=device, ts=tc, **gan_kw)
         gans[c] = (handle, len(Xc))
         histories[c] = hist
     return gans, histories
@@ -219,12 +255,24 @@ def train_class_gans(train_array, seed, device, n_classes=8,
 def augment(train_array, gans, ratio, seed, device,
             feat_slice=(1, 14), label_col=-1):
     """Real + synthetic rows; ratio = synthetic-per-real per class; 0 -> unchanged.
-    Timestamp column of synthetic rows is 0 (never read by the classifiers)."""
+    Timestamp column of synthetic rows is 0 (never read by the classifiers).
+
+    ISSUE-2 FIX: `train_array` is the AUGMENTATION TARGET and may differ from the
+    data the GANs were trained on. TimeGAN must be TRAINED on the contiguous
+    TimeGANs_csv scenes (chronology), but the array it augments must be the
+    standard random-sampled CSV_Files scene train — the same real rows every
+    other GAN augments — so the ratio-0 baseline is identical across GANs.
+    Synthetic counts are therefore derived from the labels of `train_array`
+    itself, not from the GAN-training class sizes."""
     if ratio <= 0 or not gans:
         return train_array
     width = train_array.shape[1]
+    labels = train_array[:, label_col].astype(int)
     blocks = [train_array]
-    for c, (handle, n_real) in gans.items():
+    for c, (handle, n_real_gan) in gans.items():
+        n_real = int((labels == c).sum())
+        if n_real == 0:          # class absent in the target (shouldn't happen)
+            n_real = n_real_gan
         n_gen = int(round(ratio * n_real))
         gen = generate(handle, n_gen, seed=seed, device=device)
         if len(gen) == 0:
