@@ -8,28 +8,6 @@ PyTorch redesign of jsyoon0823/TimeGAN (Yoon et al., NeurIPS 2019) for this doma
       2) supervised next-step prediction in latent space,
       3) joint adversarial training (G+S updated twice per D update, with the
          supervised and moment-matching terms, weights 100/100/gamma as in the paper).
-  * PER-CLASS, like dcgans/wgans: one TimeGAN per fault class. Public API mirrors
-    those modules (train_class_gans / augment) so it drops into the same notebooks.
-  * SEQUENCES IN, ROWS OUT: trains on stride-1 windows of length seq_len cut from
-    the class's (time-ordered!) rows; generated windows are UNROLLED back into
-    individual rows so the row-based classifiers consume them unchanged.
-
-DATA REQUIREMENT (critical) — two different roles for real data
-----------------------------------------------------------------
-* train_class_gans: feed the CONTIGUOUS scene files from TimeGANs_csv/
-  (subsample_timegan), NOT the random-sampled CSV_Files scenes. Random rows
-  destroy within-window chronology and reduce TimeGAN to an expensive
-  autoencoder.
-* augment: feed the STANDARD random-sampled CSV_Files scene train — the same
-  file the other GANs augment. Writing the contiguous data into the classifier
-  track was Issue 2: it silently changed the ratio-0 baseline (~37% vs ~90% F1)
-  and invalidated every cross-GAN comparison. Only the GAN sees contiguous data;
-  the classifiers must never train on it.
-
-Scarce-scene behaviour: if a class has fewer rows than seq_len, the window length
-shrinks to that class's row count (recorded in history["seq_len_used"]); with
-seq_len effectively 1–10 the temporal modelling is degenerate — report those scenes
-honestly rather than as genuine TimeGAN results.
 """
 
 import random
@@ -64,18 +42,6 @@ class _GRUNet(nn.Module):
 
 
 def _make_windows(X_rows, seq_len, ts=None, gap_factor=1.5):
-    """(n_rows, F) -> (n_windows, L, F) stride-1 windows.
-
-    If `ts` (per-row timestamps) is given, rows are first split into contiguous
-    RUNS wherever the time step exceeds gap_factor x median dt, and windows are
-    cut WITHIN runs only — a window must never straddle a discontinuity. This
-    matters when the training set is several contiguous chunks concatenated
-    (multi-chunk subsample) or when holdout-row drops punched 1-row gaps into a
-    block. Without ts, the old single-run behaviour applies.
-
-    L shrinks to the longest run when runs are shorter than seq_len (degenerate;
-    recorded in history). Returns (windows, L, n_runs).
-    """
     n = len(X_rows)
     if ts is not None and n > 1:
         d = np.diff(np.asarray(ts, dtype="float64"))
@@ -99,9 +65,6 @@ def train_timegan(X_rows, seed, device, ts=None, seq_len=24, hidden_dim=24,
                   num_layers=3,
                   n_epochs_emb=300, n_epochs_sup=300, n_epochs_joint=400,
                   batch_size=64, lr=1e-3, gamma=1.0, verbose=False):
-    """Train one TimeGAN on ONE class's time-ordered feature rows.
-    `ts`: per-row timestamps; when given, windows are cut within contiguous
-    runs only (multi-chunk safe). Returns (handle, history)."""
     set_seed(seed)
     n_features = X_rows.shape[1]
 
@@ -214,7 +177,6 @@ def train_timegan(X_rows, seed, device, ts=None, seq_len=24, hidden_dim=24,
 
 
 def generate(handle, n_rows, seed, device):
-    """Generate n_rows synthetic rows (windows unrolled)."""
     if n_rows <= 0:
         return np.empty((0, handle["scaler"].n_features_in_), dtype="float32")
     G, S, R = handle["generator"], handle["supervisor"], handle["recovery"]
@@ -232,10 +194,6 @@ def generate(handle, n_rows, seed, device):
 # ---------- public API mirrors dcgans/wgans ----------
 def train_class_gans(train_array, seed, device, n_classes=8,
                      feat_slice=(1, 14), label_col=-1, ts_col=0, **gan_kw):
-    """One TimeGAN per class. train_array rows MUST be time-ordered within each
-    class (use TimeGANs_csv; multiple contiguous chunks are fine — timestamps
-    in `ts_col` are used to split windowing at chunk boundaries).
-    Returns (gans, histories) shaped like dcgans."""
     feats = train_array[:, feat_slice[0]:feat_slice[1]].astype("float32")
     labels = train_array[:, label_col].astype(int)
     tsall = train_array[:, ts_col].astype("float64") if ts_col is not None else None
@@ -254,16 +212,6 @@ def train_class_gans(train_array, seed, device, n_classes=8,
 
 def augment(train_array, gans, ratio, seed, device,
             feat_slice=(1, 14), label_col=-1):
-    """Real + synthetic rows; ratio = synthetic-per-real per class; 0 -> unchanged.
-    Timestamp column of synthetic rows is 0 (never read by the classifiers).
-
-    ISSUE-2 FIX: `train_array` is the AUGMENTATION TARGET and may differ from the
-    data the GANs were trained on. TimeGAN must be TRAINED on the contiguous
-    TimeGANs_csv scenes (chronology), but the array it augments must be the
-    standard random-sampled CSV_Files scene train — the same real rows every
-    other GAN augments — so the ratio-0 baseline is identical across GANs.
-    Synthetic counts are therefore derived from the labels of `train_array`
-    itself, not from the GAN-training class sizes."""
     if ratio <= 0 or not gans:
         return train_array
     width = train_array.shape[1]
@@ -285,7 +233,6 @@ def augment(train_array, gans, ratio, seed, device,
 
 
 def plot_timegan_history(history, title=""):
-    """Reconstruction, supervised, and joint-phase curves for one class."""
     import matplotlib.pyplot as plt
     fig, ax = plt.subplots(1, 3, figsize=(13, 3.4))
     ax[0].plot(history["e_loss"]); ax[0].set_title(f"{title} — recon (phase 1)")
