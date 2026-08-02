@@ -10,10 +10,6 @@ Adapted from eriklindernoren's cgan.py. Differences from the DCGAN module:
     are therefore NOT comparable to the BCE-based DCGAN, but d_acc still is.
   * One GLOBAL scaler (fit on all training features) since one model emits every
     class; class structure is carried by the embedding, not by separate scalers.
-
-Interface mirrors dcgan_1d so it drops into the same notebook loop:
-  bundle, history = train_cgan(train_array, seed, device)
-  aug_array       = augment_cgan(train_array, bundle, ratio, seed, device)
 """
 
 import random
