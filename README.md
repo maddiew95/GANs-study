@@ -121,10 +121,14 @@ Recommended reporting flow:
 2. Use the generated summary CSV(s) for tables/plots.
 3. For GAN studies, compare best ratio per scene against ratio `0.0` baseline.
 
-## Caveats and limitations
+## Limitations
 - Repository is notebook-first; there is no single CLI experiment runner.
 - Dataset CSVs are expected but not included in this repository.
 - Many notebooks default to `device = "cuda:1"`; adjust for your hardware.
 - TimeGAN notebooks intentionally use a separate contiguous training tree (`TimeGANs_csv`) before writing augmented outputs into the standard scene tree.
 - GAN-comparison notebooks include cache-purge logic (including temporary `PURGE_GANS=["timegans"]` in notebook code) tied to prior cache issues; read those cells before resuming partial runs.
 - `util.py` contains outlier-removal logic, but active preprocessing currently uses z-score normalization only.
+
+- ## License
+
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
